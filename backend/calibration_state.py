@@ -42,6 +42,9 @@ def _default_state() -> Dict[str, Any]:
         "progress": 0,
         "instruction": Instruction.HOLD_POSITION.value,
         "reason": "Waiting for calibration engine…",
+        "occupancy": None,
+        "active_mask": None,
+        "total_active_cells": 0,
         "ts": time.time(),
     }
 
@@ -92,6 +95,9 @@ class CalibrationState:
         progress: float,
         instruction: str,
         reason: str = "",
+        occupancy: Optional[list] = None,
+        active_mask: Optional[list] = None,
+        total_active_cells: int = 0,
     ) -> None:
         """
         Publish a new calibration snapshot. Safe to call from the
@@ -110,6 +116,9 @@ class CalibrationState:
             "progress": max(0, min(100, round(float(progress)))),
             "instruction": Instruction(instruction).value,
             "reason": reason,
+            "occupancy": occupancy,
+            "active_mask": active_mask,
+            "total_active_cells": int(total_active_cells),
             "ts": time.time(),
         }
         self._state = payload

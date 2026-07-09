@@ -11,6 +11,8 @@
 
   const RING_RADIUS = 60;
   const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
+  const GRID_ROWS = 5;
+  const GRID_COLS = 8;
 
   // Enum value -> readable label. Falls back to a generic humanizer for
   // any value not listed here, so an engine update never renders blank.
@@ -57,7 +59,6 @@
   }
 
   function zoomIcon(inward) {
-    // four chevrons pointing toward (closer) or away from (farther) centre
     const chevrons = [0, 90, 180, 270]
       .map(function (deg) {
         const d = inward ? "M50 30 L65 45 L35 45 Z" : "M50 20 L65 35 L35 35 Z";
@@ -78,7 +79,6 @@
   }
 
   function tiltIcon(axis) {
-    // camera body with a curved arrow indicating the tilt direction
     let arrow;
     switch (axis) {
       case "left":
@@ -166,6 +166,9 @@
   const barPose = document.getElementById("barPose");
   const barRadial = document.getElementById("barRadial");
   const connLabel = document.getElementById("connLabel");
+  const coverageCellsEl = document.getElementById("coverageCells");
+  const coverageLabelEl = document.getElementById("coverageLabel");
+  let cellEls = [];
 
   progressRing.style.strokeDasharray = String(RING_CIRCUMFERENCE);
   progressRing.style.strokeDashoffset = String(RING_CIRCUMFERENCE);
@@ -173,6 +176,46 @@
   function setBar(el, value) {
     const pct = clamp((Number(value) || 0) * 100, 0, 100);
     el.style.width = pct + "%";
+  }
+
+  function buildCoverageGrid() {
+    coverageCellsEl.innerHTML = "";
+    cellEls = [];
+    for (let r = 0; r < GRID_ROWS; r++) {
+      const row = [];
+      for (let c = 0; c < GRID_COLS; c++) {
+        const div = document.createElement("div");
+        div.className = "cov-cell";
+        coverageCellsEl.appendChild(div);
+        row.push(div);
+      }
+      cellEls.push(row);
+    }
+  }
+  buildCoverageGrid();
+
+  function updateCoverageGrid(data) {
+    const occupancy = data.occupancy;
+    const activeMask = data.active_mask;
+    if (!occupancy || !activeMask) return; // no grid data yet
+
+    let covered = 0;
+    for (let r = 0; r < GRID_ROWS; r++) {
+      for (let c = 0; c < GRID_COLS; c++) {
+        const el = cellEls[r][c];
+        const isActive = !!activeMask[r][c];
+        const isOccupied = !!occupancy[r][c];
+        const isEdge = r === 0 || r === GRID_ROWS - 1 || c === 0 || c === GRID_COLS - 1;
+
+        el.classList.toggle("cov-cell--inactive", !isActive);
+        el.classList.toggle("cov-cell--occupied", isActive && isOccupied);
+        el.classList.toggle("cov-cell--edge", isActive && !isOccupied && isEdge);
+
+        if (isActive && isOccupied) covered++;
+      }
+    }
+    const total = data.total_active_cells || GRID_ROWS * GRID_COLS;
+    coverageLabelEl.textContent = "COVERAGE — " + covered + "/" + total;
   }
 
   function render(data) {
@@ -198,6 +241,7 @@
     setBar(barSpatial, data.spatial);
     setBar(barPose, data.pose);
     setBar(barRadial, data.radial);
+    updateCoverageGrid(data);
   }
 
   function setConnected(isConnected) {

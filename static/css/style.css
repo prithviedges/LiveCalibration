@@ -49,7 +49,40 @@ html, body {
   user-select: none;
   -webkit-touch-callout: none;
 }
-
+.coverage-grid {
+  margin-top: 10px;
+}
+.coverage-grid__label {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: rgba(255,255,255,0.55);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+}
+.coverage-grid__cells {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr); /* GRID_COLS */
+  gap: 3px;
+}
+.cov-cell {
+  aspect-ratio: 8 / 5; /* roughly GRID_COLS/GRID_ROWS per-cell */
+  border-radius: 2px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: #2e1e1e; /* uncovered, active */
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.cov-cell--inactive {
+  background: #373737;
+  border-color: #505050;
+}
+.cov-cell--edge {
+  background: #321e3c;
+  border-color: #5032a0;
+}
+.cov-cell--occupied {
+  background: #1e3c28;
+  border-color: #3cd250;
+}
 .rig {
   position: relative;
   width: 100vw;

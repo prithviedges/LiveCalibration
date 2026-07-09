@@ -1240,6 +1240,15 @@ def main() -> None:
             print(f"Could not reach camera API ({e}).  Falling back to webcam 0.")
 
     cap = cv.VideoCapture(stream_url)
+    cv.namedWindow("Intrinsic Calibration [Parallel]", cv.WINDOW_NORMAL)
+    cv.resizeWindow("Intrinsic Calibration [Parallel]", 1600, 900)
+    cap.set(cv.CAP_PROP_FRAME_WIDTH, 1920)
+    cap.set(cv.CAP_PROP_FRAME_HEIGHT, 1080)
+    cap.set(cv.CAP_PROP_AUTOFOCUS, 0)
+    
+    ret, frame = cap.read()
+    if ret:
+        print(f"Actual frame shape: {frame.shape}")
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video source: {stream_url!r}")
 

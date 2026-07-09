@@ -171,4 +171,7 @@ def publish_engine_snapshot(calibration_state: CalibrationState, snapshot: Dict[
         progress=composite * 100,
         instruction=instruction.value,
         reason=reason,
+        occupancy=snapshot["occupancy"].astype(bool).tolist(),
+        active_mask=snapshot["active_mask"].astype(bool).tolist(),
+        total_active_cells=snapshot["total_active_cells"],
     )
