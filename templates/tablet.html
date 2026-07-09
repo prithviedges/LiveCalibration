@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Calibration Assistant</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="theme-color" content="#0B0D10">
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <div class="rig" id="rig" data-status="hold" data-connected="false">
+    <div class="hazard-frame" aria-hidden="true"></div>
+
+    <header class="hud-top">
+      <div class="grade-pod" aria-label="Calibration grade and progress">
+        <svg class="grade-ring" viewBox="0 0 140 140">
+          <circle class="grade-ring__track" cx="70" cy="70" r="60"></circle>
+          <circle class="grade-ring__fill" id="progressRing" cx="70" cy="70" r="60"></circle>
+        </svg>
+        <div class="grade-pod__center">
+          <div class="grade-pod__grade" id="gradeLetter">&ndash;</div>
+          <div class="grade-pod__pct" id="progressPct">0%</div>
+        </div>
+      </div>
+
+      <div class="hud-title">
+        <span class="hud-title__main">CALIBRATION ASSISTANT</span>
+        <span class="hud-title__sub" id="statusWord">CONNECTING</span>
+      </div>
+
+      <div class="conn-indicator" id="connIndicator">
+        <span class="conn-dot"></span>
+        <span class="conn-label" id="connLabel">LINK DOWN</span>
+      </div>
+    </header>
+
+    <main class="task-stage">
+      <div class="task-icon" id="taskIcon" aria-hidden="true"></div>
+      <div class="task-eyebrow">CURRENT TASK</div>
+      <div class="task-label" id="taskLabel">HOLD POSITION</div>
+      <div class="task-reason" id="taskReason">Waiting for calibration engine&hellip;</div>
+    </main>
+
+    <footer class="hud-bottom">
+      <div class="metric">
+        <span class="metric__label">SPATIAL</span>
+        <div class="metric__bar"><div class="metric__fill" id="barSpatial"></div></div>
+      </div>
+      <div class="metric">
+        <span class="metric__label">POSE</span>
+        <div class="metric__bar"><div class="metric__fill" id="barPose"></div></div>
+      </div>
+      <div class="metric">
+        <span class="metric__label">RADIAL</span>
+        <div class="metric__bar"><div class="metric__fill" id="barRadial"></div></div>
+      </div>
+    </footer>
+  </div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>

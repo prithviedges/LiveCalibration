@@ -1,0 +1,302 @@
+/* ==========================================================================
+   Calibration Assistant — Tablet HUD
+   Design language: outdoor pit-lane signal board. Flat, saturated status
+   colour fills the task stage (the thing the operator must react to);
+   chrome above/below stays a constant dark neutral so the grade ring and
+   coverage bars read the same in every state. Hazard-stripe frame appears
+   only while movement is required — a glanceable "still working" cue that
+   needs no animation to register.
+   ========================================================================== */
+
+:root {
+  /* neutral chrome */
+  --c-chrome-bg: #0B0D10;
+  --c-chrome-fg: #F4F6F8;
+  --c-chrome-fg-dim: #8A9199;
+  --c-chrome-line: #23272C;
+
+  /* status colours (background + matching foreground for contrast) */
+  --c-move-bg: #B8271F;
+  --c-move-fg: #FFFFFF;
+  --c-almost-bg: #E0A400;
+  --c-almost-fg: #191400;
+  --c-hold-bg: #167A3E;
+  --c-hold-fg: #FFFFFF;
+  --c-complete-bg: #1656A6;
+  --c-complete-fg: #FFFFFF;
+
+  /* current status, redefined by [data-status] below */
+  --c-stage-bg: var(--c-hold-bg);
+  --c-stage-fg: var(--c-hold-fg);
+
+  --radius-lg: 20px;
+  --radius-md: 12px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--c-chrome-bg);
+  color: var(--c-chrome-fg);
+  font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.rig {
+  position: relative;
+  width: 100vw;
+  height: 100dvh;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  background: var(--c-chrome-bg);
+}
+
+/* status → colour mapping (single source of truth for the stage fill) */
+.rig[data-status="move"]     { --c-stage-bg: var(--c-move-bg);     --c-stage-fg: var(--c-move-fg); }
+.rig[data-status="almost"]   { --c-stage-bg: var(--c-almost-bg);   --c-stage-fg: var(--c-almost-fg); }
+.rig[data-status="hold"]     { --c-stage-bg: var(--c-hold-bg);     --c-stage-fg: var(--c-hold-fg); }
+.rig[data-status="complete"] { --c-stage-bg: var(--c-complete-bg); --c-stage-fg: var(--c-complete-fg); }
+
+/* ── hazard frame: visible only while movement is required ── */
+.hazard-frame {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+  border: 0 solid transparent;
+  transition: border-width 300ms ease, border-color 300ms ease;
+}
+.rig[data-status="move"] .hazard-frame {
+  border-width: 10px;
+  border-image: repeating-linear-gradient(
+    45deg,
+    var(--c-move-bg) 0 28px,
+    var(--c-almost-bg) 28px 56px
+  ) 10;
+}
+
+/* ==========================================================================
+   Header
+   ========================================================================== */
+.hud-top {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 16px 28px;
+  background: var(--c-chrome-bg);
+  border-bottom: 1px solid var(--c-chrome-line);
+  z-index: 2;
+}
+
+.grade-pod {
+  position: relative;
+  width: 92px;
+  height: 92px;
+  flex: 0 0 auto;
+}
+.grade-ring { width: 100%; height: 100%; transform: rotate(-90deg); }
+.grade-ring__track,
+.grade-ring__fill {
+  fill: none;
+  stroke-width: 10;
+}
+.grade-ring__track { stroke: var(--c-chrome-line); }
+.grade-ring__fill {
+  stroke: var(--c-chrome-fg);
+  stroke-linecap: round;
+  transition: stroke-dashoffset 500ms ease, stroke 300ms ease;
+}
+.rig[data-status="move"]     .grade-ring__fill { stroke: var(--c-move-bg); }
+.rig[data-status="almost"]   .grade-ring__fill { stroke: var(--c-almost-bg); }
+.rig[data-status="hold"]     .grade-ring__fill { stroke: var(--c-hold-bg); }
+.rig[data-status="complete"] .grade-ring__fill { stroke: var(--c-complete-bg); }
+
+.grade-pod__center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+.grade-pod__grade {
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+.grade-pod__pct {
+  margin-top: 2px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--c-chrome-fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-title {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.hud-title__main {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--c-chrome-fg-dim);
+}
+.hud-title__sub {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.conn-indicator {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: #14171B;
+  border: 1px solid var(--c-chrome-line);
+}
+.conn-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #C0271F;
+  transition: background-color 300ms ease;
+}
+.rig[data-connected="true"] .conn-dot { background: #26B368; }
+.conn-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--c-chrome-fg-dim);
+}
+
+/* ==========================================================================
+   Task stage — the largest area, colour-coded, the operator's single focus
+   ========================================================================== */
+.task-stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(8px, 1.6vh, 18px);
+  padding: 4vh 6vw;
+  background: var(--c-stage-bg);
+  color: var(--c-stage-fg);
+  text-align: center;
+  transition: background-color 350ms ease, color 350ms ease;
+  overflow: hidden;
+}
+
+.task-icon {
+  width: clamp(64px, 14vh, 150px);
+  height: clamp(64px, 14vh, 150px);
+  color: var(--c-stage-fg);
+}
+.task-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  fill: currentColor;
+  stroke: currentColor;
+}
+
+.task-eyebrow {
+  font-size: clamp(14px, 2vw, 20px);
+  font-weight: 800;
+  letter-spacing: 0.24em;
+  opacity: 0.78;
+}
+
+.task-label {
+  font-size: clamp(3.2rem, 12vw, 9.5rem);
+  font-weight: 900;
+  letter-spacing: -0.01em;
+  line-height: 0.98;
+  text-wrap: balance;
+}
+
+.task-reason {
+  font-size: clamp(1rem, 2.4vw, 1.6rem);
+  font-weight: 600;
+  opacity: 0.88;
+  max-width: 46ch;
+}
+
+/* ==========================================================================
+   Footer — coverage bars
+   ========================================================================== */
+.hud-bottom {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+  padding: 16px 28px 20px;
+  background: var(--c-chrome-bg);
+  border-top: 1px solid var(--c-chrome-line);
+  z-index: 2;
+}
+
+.metric {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.metric__label {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  color: var(--c-chrome-fg-dim);
+  width: 62px;
+}
+.metric__bar {
+  flex: 1 1 auto;
+  height: 12px;
+  border-radius: 999px;
+  background: var(--c-chrome-line);
+  overflow: hidden;
+}
+.metric__fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: var(--c-chrome-fg);
+  transition: width 500ms ease;
+}
+
+/* ==========================================================================
+   Responsive: portrait fallback (tablet is expected landscape, but don't
+   break if rotated)
+   ========================================================================== */
+@media (orientation: portrait) {
+  .hud-top { padding: 12px 18px; gap: 12px; }
+  .grade-pod { width: 72px; height: 72px; }
+  .hud-title__main { display: none; }
+  .hud-bottom { grid-template-columns: 1fr; gap: 10px; padding: 12px 18px 16px; }
+  .task-label { font-size: clamp(2.4rem, 14vw, 6rem); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .grade-ring__fill,
+  .metric__fill,
+  .task-stage,
+  .hazard-frame {
+    transition-duration: 1ms !important;
+  }
+}
