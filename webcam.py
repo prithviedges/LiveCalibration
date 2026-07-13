@@ -66,7 +66,7 @@ if __name__ == "__main__":
     server_thread = threading.Thread(target=_run_dashboard_server, daemon=True)
     server_thread.start()
     time.sleep(1.0)  # let the server bind before printing the URL
-
+    
     print("=" * 70)
     print("Dashboard running:")
     print("  Control room (this laptop): http://localhost:8000/")
@@ -76,4 +76,4 @@ if __name__ == "__main__":
     intrinsic_calc.main()  # opens the webcam preview window; blocks until ESC/Q
 
 
-    # python run_with_webcam.py --source 0
+    # python webcam.py --source 0

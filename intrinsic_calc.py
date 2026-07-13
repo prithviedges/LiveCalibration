@@ -105,7 +105,7 @@ BOOTSTRAP_MIN_FRAMES = 25       # frames before first live calibration attempt
 ROLLING_FPS_WINDOW   = 50       # frames for rolling fps estimate
 
 # ── Pitch segmentation / active-cell config ──
-PITCH_SEG_MODEL_PATH = r"C:\Users\prith\OneDrive\Desktop\Keypoint Detection Using Homography\Pitch Segmentation\weights\best.pt"   # path to your YOLO segmentation weights
+PITCH_SEG_MODEL_PATH = r"C:\Users\prith\Downloads\calibration-dashboard\calibration-dashboard\weights\pitch_segmentation.pt"   # path to your YOLO segmentation weights
 PITCH_SEG_CONF       = 0.7             # confidence threshold for the seg model
 PITCH_SEG_CLASS_ID   = 0             # None = use all predicted masks; set an int to filter to one class
 PITCH_MARGIN_RATIO   = 0.15             # expand the quad's bounding box by this fraction of its w/h
@@ -406,7 +406,7 @@ def compute_radial_score(
 
 def coverage_grade(score: float) -> str:
     """Map composite score to letter grade."""
-    if score >= 0.85: return "A"
+    if score >= 0.88: return "A"
     if score >= 0.80: return "B"
     if score >= 0.60: return "C"
     if score >= 0.55: return "D"
@@ -1119,7 +1119,7 @@ def run_final_calibration(
 
     img_size = (img_shape[1], img_shape[0])   # (width, height) for OpenCV
 
-    n_sample = min(len(objpoints), 80)
+    n_sample = min(len(objpoints), 100)
     idx      = random.sample(range(len(objpoints)), n_sample)
     print(f"\n📷  Pass 1 — calibrating on {n_sample} frames …")
     try:
@@ -1143,7 +1143,7 @@ def run_final_calibration(
         frame_errors.append((err, obj, img))
 
     frame_errors.sort(key=lambda x: x[0])
-    best_n   = min(50, len(frame_errors))
+    best_n   = min(80, len(frame_errors))
     best_obj = [e[1] for e in frame_errors[:best_n]]
     best_img = [e[2] for e in frame_errors[:best_n]]
 
@@ -1302,10 +1302,11 @@ def main() -> None:
 
     while True:
         ret, frame = cap.read()
+
         if not ret:
             print("⚠  No frame received — end of stream or camera disconnected.")
             break
-
+        raw_frame = frame.copy()
         # Set image dimensions once
         with shared_lock:
             if shared["img_w"] is None:
@@ -1357,7 +1358,8 @@ def main() -> None:
             print(f"\n▶  Recording: {'ON' if recording else 'OFF'}")
             if recording:
                 dropped_counter[0] = 0
-
+                filename = "recorded_frames/stump_image.png"
+                cv.imwrite(filename, raw_frame)
                 # ── First recording start: segment the (assumed empty) pitch
                 #    from the current frame and lock the active-cell mask.
                 if pitch_seg_pending:
