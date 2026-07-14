@@ -10,10 +10,10 @@ from stumps import detect_stump_keypoints
 
 
 #config
-CORNERS_WEIGHTS = "weights/corners.pt"      
-PITCH_WEIGHTS   = "weights/pitch_segmentation.pt"         
+CORNERS_WEIGHTS = "weights/refinedData.pt"      
+PITCH_WEIGHTS   = "weights/best.pt"         
 
-IMAGES_DIR = "recorded_frames"               
+IMAGES_DIR = "images"               
 SAVE_DIR   = "kp_output"                  
 
 CONF_CORNERS = 0.25
