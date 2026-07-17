@@ -100,19 +100,19 @@ def main(
     image_path=r"recorded_frames\stump_image.png",
     calib_npz_path="calib_params.npz",
     recorded_frames_dir="recorded_frames",
-    stump_csv_name="stump_image.csv",
+    stump_csv_name="recorded\stump_image.csv",
     extrinsics_out_path="camera_params.npz",
     show_display=True,
 ):
     #---------------Camera Intrinsics-----------------#
-    DEFAULT_K = np.array([
-        [1495.7, 0, 961.93],
-        [0, 1486.7, 477.33],
-        [0, 0, 1]]
+    DEFAULT_K = np.array([[ 1.35323365e+04 , 0.00000000e+00, -6.04161675e+02],
+ [ 0.00000000e+00,  1.24096074e+04,  4.83085312e+02],
+ [ 0.00000000e+00,  0.00000000e+00,  1.00000000e+00]]
 
     , dtype=np.float64)
 
-    DEFAULT_dist_coeffs = np.array([[0.038484, -0.081011, -0.001740, 0.003131, 0.039666]], dtype=np.float64)
+    DEFAULT_dist_coeffs = np.array([[ 1.13924727e+00 , 9.02941843e+00 ,-1.27620822e-02, -2.38576615e-01,
+  -5.06819979e+01]], dtype=np.float64)
 
     K, dist_coeffs = load_camera_intrinsics(calib_npz_path, DEFAULT_K, DEFAULT_dist_coeffs)
 
@@ -162,32 +162,30 @@ def main(
 
     #---------------Image Coordinates-----------------#
     DEFAULT_pitch_image = np.array([
-        (956, 309),
-        (1082, 314),
-        (1209, 320),
-        (1346, 328),
-        (933, 336),
-        (1062, 345),
-        (1208, 352),
-        (1355, 362),
-        (712, 572),
-        (943, 589),
-        (1184, 611),
-        (1440, 626),
-        (618, 670),
-        (889, 693),
-        (1174, 720),
-        (1480, 746),
-
-
+        (838, 433),   # 1
+    (917, 433),   # 2
+    (1263, 433),  # 3
+    (1342, 433),  # 4
+    (838, 456),   # 5
+    (917, 453),   # 6
+    (1263, 457),  # 7
+    (1352, 457),  # 8
+    (753, 913),   # 9
+    (861, 913),   # 10
+    (1348, 918),  # 11
+    (1471, 918),  # 12
+    (743, 967),   # 13
+    (854, 961),   # 14
+    (1359, 966),  # 15
+    (1479, 972),  # 16
 
     ], dtype=np.float64)
 
     DEFAULT_wicket_image = np.array([
-        (1100, 143),
-        (1146, 145),
-        (914, 344),
-        (1002, 346),
+            (1071, 296),  # 17
+    (1118, 296),  # 18
+    (1077, 760),  # 19
+    (1148, 760),  # 20
     ], dtype=np.float64)
 
     pitch_image, wicket_image = load_image_points(

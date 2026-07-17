@@ -32,35 +32,24 @@ import cv2
 CALIB_NPZ_PATH = "camera_params.npz"
 
 RECORDED_FRAMES_DIR = "recorded_frames"
-STUMP_CSV_NAME = "stump_image.csv"   # columns: image, point, x, y - all rows used, no split
+STUMP_CSV_NAME = r"recorded_frames/stump_image.csv"   # columns: image, point, x, y - all rows used, no split
 
 USE_MANUAL_PARAMETERS = False   # True = ignore camera_params.npz completely
 
-MANUAL_K = np.array([
-    [647.0390,   0.0,    340.0715],
-    [0.0,      638.5018, 234.2572],
-    [0.0,        0.0,      1.0]
-], dtype=np.float64)
+MANUAL_K = np.array([[ 1.35323365e+04 , 0.00000000e+00, -6.04161675e+02],
+ [ 0.00000000e+00,  1.24096074e+04,  4.83085312e+02],
+ [ 0.00000000e+00,  0.00000000e+00,  1.00000000e+00]], dtype=np.float64)
 
-MANUAL_DIST = np.array([
-    0.013613,
-    0.086619,
-    0.002772,
-    0.001628,
-   -0.470705
-], dtype=np.float64).reshape(-1, 1)
+MANUAL_DIST = np.array([[ 1.13924727e+00 , 9.02941843e+00 ,-1.27620822e-02, -2.38576615e-01,
+  -5.06819979e+01]], dtype=np.float64).reshape(-1, 1)
 
 MANUAL_R = np.array([
-    [ 0.9854, -0.1280, -0.1124],
-    [-0.0883, -0.9481,  0.3054],
-    [-0.1456, -0.2910, -0.9456]
-], dtype=np.float64)
+             [+0.9915, -0.0029, -0.1301], 
+             [+0.0099, -0.9952, +0.0976], 
+             [-0.1298, -0.0981, -0.9867]
+             ], dtype=np.float64)
 
-MANUAL_T = np.array([
-    [0.6545],
-    [-0.4335],
-    [6.9230]
-], dtype=np.float64)
+MANUAL_T = np.array([+8.2679, -0.1339, +61.1358], dtype=np.float64)
 
 
 
@@ -97,26 +86,26 @@ WORLD_POINTS = np.array([
 ], dtype=np.float64)
 
 IMAGE_POINTS_OBSERVED = np.array([
-    (326, 190),
-    (367, 191),
-    (410, 194),
-    (453, 196),
-    (318, 203),
-    (364, 207),
-    (410, 210),
-    (458, 211),
-    (253, 319),
-    (328, 327),
-    (408, 336),
-    (491, 343),
-    (227, 365),
-    (312, 376),
-    (406, 388),
-    (506, 401),
-    (374, 116),
-    (388, 116),
-    (317, 232),
-    (350, 235),
+    (838, 433),   # 1
+    (917, 433),   # 2
+    (1263, 433),  # 3
+    (1342, 433),  # 4
+    (838, 456),   # 5
+    (917, 453),   # 6
+    (1263, 457),  # 7
+    (1352, 457),  # 8
+    (753, 913),   # 9
+    (861, 913),   # 10
+    (1348, 918),  # 11
+    (1471, 918),  # 12
+    (743, 967),   # 13
+    (854, 961),   # 14
+    (1359, 966),  # 15
+    (1479, 972),  # 16
+    (1071, 296),  # 17
+    (1118, 296),  # 18
+    (1077, 760),  # 19
+    (1148, 760),  # 20
 ], dtype=np.float64)
 
 # Known pitch center in world coordinates (often (0, 0, 0))
@@ -292,12 +281,61 @@ def main():
           f"(expected {EXPECTED_CAMERA_TO_PITCH_CENTER_M} +/- {DISTANCE_TOLERANCE_M} m)")
     print()
 
+    # --- draw and save overlay ---
+    img_path = os.path.join(RECORDED_FRAMES_DIR, "stump_image.png")
+    img = cv2.imread(img_path)
+    if img is None:
+        print(f"Error: Could not load base image from {img_path}")
+    else:
+        labels = [f"P{i}" for i in range(1, 17)] + [f"Q{i}" for i in range(1, 5)]
+        for lbl, measured, proj, err in zip(labels, image_points_observed, projected, errors):
+            mx, my = np.round(measured).astype(int)
+            px, py = np.round(proj).astype(int)
+            
+            # Draw error line (blue)
+            cv2.line(img, (mx, my), (px, py), (255, 0, 0), 2)
+            
+            # Draw original observed point (green)
+            cv2.circle(img, (mx, my), 10, (0, 255, 0), -1)
+            
+            # Draw reprojected point (red)
+            cv2.circle(img, (px, py), 10, (0, 0, 255), -1)
+            
+            # Label point
+            cv2.putText(
+                img,
+                f"{lbl} ({err:.1f}px)",
+                (mx + 10, my - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA
+            )
+            
+        cv2.imwrite("overlay.png", img)
+        print("Saved overlay image to overlay.png")
+        
+        # Display image
+        h, w = img.shape[:2]
+        scale = min(1600 / w, 900 / h)
+        display_img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        
+        try:
+            cv2.imshow("Reprojection Overlay", display_img)
+            print("Displaying overlay window. Press any key on the window to close and exit.")
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
+        except Exception as e:
+            print(f"Could not display the image window: {e}")
+
     if mean_error <= MAX_MEAN_REPROJECTION_ERROR_PX and EXPECTED_CAMERA_TO_PITCH_CENTER_M - dist_to_center <= DISTANCE_TOLERANCE_M:
         print(f"PASS: mean error {mean_error:.3f}px <= {MAX_MEAN_REPROJECTION_ERROR_PX}px "
               "-> extrinsic stage OK, proceed.")
     else:
         print(f"FAIL: mean error {mean_error:.3f}px > {MAX_MEAN_REPROJECTION_ERROR_PX}px "
               "-> go back to intrinsic calibration stage.")
+
 
 
 if __name__ == "__main__":
