@@ -5,15 +5,16 @@ import cv2
 import csv
 import numpy as np
 from ultralytics import YOLO
+import itertools
 
 from stumps import detect_stump_keypoints
 
 
 #config
-CORNERS_WEIGHTS = "weights/refinedData.pt"      
-PITCH_WEIGHTS   = "weights/best.pt"         
+CORNERS_WEIGHTS = r"weights\finetuned.pt"      
+PITCH_WEIGHTS   = r"weights\pitch_segmentation.pt"         
 
-IMAGES_DIR = "images"               
+IMAGES_DIR = "recorded_frames"               
 SAVE_DIR   = "kp_output"                  
 
 CONF_CORNERS = 0.25
@@ -21,6 +22,8 @@ CONF_PITCH   = 0.25
 PITCH_STUMP_CLASS   = 1   
 CORNERS_STUMP_CLASS = 2   
 USE_PITCH_MODEL = False
+USE_CONSENSUS = False
+USE_ROUND = True
  
 os.makedirs(SAVE_DIR, exist_ok=True)
 
@@ -166,6 +169,47 @@ def clamp_quad_to_pitch(quad, pitch_quad):
             clamped[i] = closest_point_on_polygon_boundary(pitch_quad, pt)
 
     return clamped.astype(np.int32)
+
+
+def is_geom_valid(TL, TR, BL, BR, img_shape):
+    """
+    Validates if a set of 4 quads forms a geometrically reasonable cricket pitch perspective.
+    TL, TR, BL, BR: 4x2 numpy arrays (corners)
+    """
+    c_tl = TL.mean(axis=0)
+    c_tr = TR.mean(axis=0)
+    c_bl = BL.mean(axis=0)
+    c_br = BR.mean(axis=0)
+
+    top_y_diff = abs(c_tl[1] - c_tr[1])
+    bot_y_diff = abs(c_bl[1] - c_br[1])
+    left_h = c_bl[1] - c_tl[1]
+    right_h = c_br[1] - c_tr[1]
+    top_w = c_tr[0] - c_tl[0]
+    bot_w = c_br[0] - c_bl[0]
+
+    min_size = 0.05 * img_shape[0]
+    if left_h <= min_size or right_h <= min_size or top_w <= min_size or bot_w <= min_size:
+        return False
+
+    avg_h = 0.5 * (left_h + right_h)
+
+    # 1. Y-differences relative to height (should be close to horizontal)
+    if (top_y_diff / avg_h) > 0.18 or (bot_y_diff / avg_h) > 0.18:
+        return False
+
+    # 2. Left vs right height symmetry
+    h_ratio = left_h / right_h
+    if h_ratio < 0.65 or h_ratio > 1.55:
+        return False
+
+    # 3. Bottom vs top width ratio (trapezoidal perspective constraint)
+    w_ratio = bot_w / top_w
+    if w_ratio < 0.9 or w_ratio > 2.2:
+        return False
+
+    return True
+
 
 #pitch quad extraction
 def get_pitch_quad(pitch_result, img_shape):
@@ -362,8 +406,8 @@ def correct_line_consensus(quads_labeled):
 def main():
     CORNER_DRAW_ORDER = ["tl", "tr", "br", "bl"]
     GRID_ORDER = ["TL", "TR", "BR", "BL"]
-    DEDUPE_DIST_THRESH = 40.0  # px — center-distance duplicate test
-    DEDUPE_IOU_THRESH = 0.3    # overlap fraction — catches duplicates whose centers
+    DEDUPE_DIST_THRESH = 30.0  # px — center-distance duplicate test
+    DEDUPE_IOU_THRESH = 0.2    # overlap fraction — catches duplicates whose centers
                                 # differ by more than DEDUPE_DIST_THRESH but whose
                                 # boxes still substantially overlap (e.g. the model
                                 # firing twice on the same physical corner box)
@@ -563,14 +607,44 @@ def main():
         n_deduped = len(quads)
         trimmed_extra = False
 
-        # --- if a spurious extra detection survives dedup, keep only the 4
-        # highest-confidence quads rather than giving up on the whole frame ---
-        if len(quads) > 4:
-            order = sorted(range(len(quads)), key=lambda i: confs[i], reverse=True)[:4]
-            quads = [quads[i] for i in order]
-            classes = [classes[i] for i in order]
-            confs = [confs[i] for i in order]
-            trimmed_extra = True
+        if len(quads) >= 4:
+            valid_combinations = []
+            for indices in itertools.combinations(range(len(quads)), 4):
+                q_comb = [quads[i] for i in indices]
+                cls_comb = [classes[i] for i in indices]
+                conf_comb = [confs[i] for i in indices]
+
+                centroids = [q.mean(axis=0) for q in q_comb]
+                idx_by_y = sorted(range(4), key=lambda i: centroids[i][1])
+                top_idx, bottom_idx = idx_by_y[:2], idx_by_y[2:]
+
+                top_sorted = sorted(top_idx, key=lambda i: centroids[i][0])
+                bottom_sorted = sorted(bottom_idx, key=lambda i: centroids[i][0])
+
+                tl_i, tr_i = top_sorted[0], top_sorted[1]
+                bl_i, br_i = bottom_sorted[0], bottom_sorted[1]
+
+                TL, TR, BL, BR = q_comb[tl_i], q_comb[tr_i], q_comb[bl_i], q_comb[br_i]
+
+                if is_geom_valid(TL, TR, BL, BR, img.shape):
+                    conf_sum = sum(conf_comb)
+                    valid_combinations.append((conf_sum, indices, (TL, TR, BL, BR), cls_comb, conf_comb))
+
+            if valid_combinations:
+                valid_combinations.sort(key=lambda x: x[0], reverse=True)
+                _, selected_indices, best_layout, best_cls, best_confs = valid_combinations[0]
+                quads = list(best_layout)
+                classes = best_cls
+                confs = best_confs
+                if len(selected_indices) < n_deduped:
+                    trimmed_extra = True
+            else:
+                # Fallback: keep only the 4 highest-confidence quads
+                order = sorted(range(len(quads)), key=lambda i: confs[i], reverse=True)[:4]
+                quads = [quads[i] for i in order]
+                classes = [classes[i] for i in order]
+                confs = [confs[i] for i in order]
+                trimmed_extra = True
 
         # --- cross-quad line-consensus correction (only when exactly 4 quads found) ---
         # This runs regardless of USE_PITCH_MODEL: it's the required fallback when the
@@ -583,7 +657,8 @@ def main():
                 name: classify_corners_by_centroid(q) for name, q in grid.items()
             }
 
-            correct_line_consensus(quads_labeled)
+            if USE_CONSENSUS:
+                correct_line_consensus(quads_labeled)
 
             # class id per grid position, matched back to original detection order
             # via centroid identity
@@ -604,7 +679,10 @@ def main():
                 ordered_pts = [corners[k] for k in CORNER_DRAW_ORDER]
 
                 for ckey, p in zip(CORNER_DRAW_ORDER, ordered_pts):
-                    p_int = tuple(map(int, p))
+                    if USE_ROUND:
+                        p_int = (round(float(p[0])), round(float(p[1])))
+                    else:
+                        p_int = tuple(map(int, p))
                     cv2.circle(img, p_int, 6, (0, 0, 255), -1)
 
                     kp_idx = CORNER_INDEX[(name, ckey)]
@@ -684,7 +762,7 @@ def main():
                 kp_rows[idx]["x"] = int(pt[0])
                 kp_rows[idx]["y"] = int(pt[1])
 
-                cv2.circle(img, tuple(map(int, pt)), 6, (255, 255, 0), -1)
+                cv2.circle(img, tuple(map(int, pt)), 3, (255, 255, 0), -1)
 
                 cv2.putText(
                     img,
