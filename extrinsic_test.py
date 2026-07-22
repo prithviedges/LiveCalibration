@@ -1,7 +1,7 @@
 """
 Standalone extrinsic calibration test.
 
-Loads intrinsics (mtx/K, dist/dist_coeffs) from camera_params.npz. If the
+Loads intrinsics (mtx/K, dist/dist_coeffs) from calib_params.npz. If the
 npz also contains a pitch-scene extrinsic pose (rvec/tvec, or R/t -
 distinct from the per-checkerboard-frame rvecs/tvecs produced during
 intrinsic calibration), that pose is used directly. Otherwise raises,
@@ -29,27 +29,27 @@ import cv2
 # CONFIG - replace these with your real pitch correspondences
 # --------------------------------------------------------------------------
 
-CALIB_NPZ_PATH = "camera_params.npz"
+CALIB_NPZ_PATH = "calib_params.npz"
 
 RECORDED_FRAMES_DIR = "recorded_frames"
-STUMP_CSV_NAME = r"recorded_frames/stump_image.csv"   # columns: image, point, x, y - all rows used, no split
+STUMP_CSV_NAME = "kp_output/stump_image.csv"   # columns: image, point, x, y - all rows used, no split
 
-USE_MANUAL_PARAMETERS = False   # True = ignore camera_params.npz completely
+USE_MANUAL_PARAMETERS = False   # True = ignore CALIB_NPZ_PATH completely, False = try loading from NPZ first
 
-MANUAL_K = np.array([[ 1.35323365e+04 , 0.00000000e+00, -6.04161675e+02],
- [ 0.00000000e+00,  1.24096074e+04,  4.83085312e+02],
- [ 0.00000000e+00,  0.00000000e+00,  1.00000000e+00]], dtype=np.float64)
+MANUAL_K = np.array([[2.45171310e+04, 0.00000000e+00, 1.10824991e+03],
+ [0.00000000e+00, 2.42281298e+04, 2.68066558e+02],
+ [0.00000000e+00, 0.00000000e+00, 1.00000000e+00]], dtype=np.float64)
 
-MANUAL_DIST = np.array([[ 1.13924727e+00 , 9.02941843e+00 ,-1.27620822e-02, -2.38576615e-01,
-  -5.06819979e+01]], dtype=np.float64).reshape(-1, 1)
+MANUAL_DIST = np.array([[ 1.46278449e+01, -4.23045610e+03 ,-6.01742613e-02,  5.64750980e-02,
+   7.91119438e+04]], dtype=np.float64).reshape(-1, 1)
 
 MANUAL_R = np.array([
-             [+0.9915, -0.0029, -0.1301], 
-             [+0.0099, -0.9952, +0.0976], 
-             [-0.1298, -0.0981, -0.9867]
+             [+0.9997, +0.0251, +0.0036], 
+             [+0.0246, -0.9951, +0.0957], 
+             [+0.0060, -0.0956, -0.9954]
              ], dtype=np.float64)
 
-MANUAL_T = np.array([+8.2679, -0.1339, +61.1358], dtype=np.float64)
+MANUAL_T = np.array([-0.2678, +0.2229, +99.7946], dtype=np.float64)
 
 
 
@@ -175,16 +175,27 @@ def load_intrinsics_from_npz(npz):
     return np.asarray(K, dtype=np.float64), np.asarray(dist, dtype=np.float64)
 
 
+
+
+
 def load_observed_image_points(recorded_frames_dir, stump_csv_name, default_points):
     """
-    Load ALL observed 2D image points from
-    <recorded_frames_dir>/<stump_csv_name> (columns: image, point, x, y),
-    in file order - no splitting into pitch/stump subsets. Row order must
-    line up 1:1 with WORLD_POINTS above. Falls back to the hardcoded
-    IMAGE_POINTS_OBSERVED default if the CSV isn't found.
+    Load ALL observed 2D image points from CSV (checks recorded_frames/, kp_output/, or direct path).
+    Row order must line up 1:1 with WORLD_POINTS above.
+    Falls back to hardcoded IMAGE_POINTS_OBSERVED default if CSV isn't found.
     """
-    csv_path = os.path.join(recorded_frames_dir, stump_csv_name)
-    if os.path.isfile(csv_path):
+    candidate_paths = [
+        os.path.join(recorded_frames_dir, stump_csv_name),
+        os.path.join("kp_output", stump_csv_name),
+        stump_csv_name,
+    ]
+    csv_path = None
+    for p in candidate_paths:
+        if os.path.isfile(p):
+            csv_path = p
+            break
+
+    if csv_path is not None:
         rows = []
         with open(csv_path, newline="") as f:
             reader = csv.DictReader(f)
@@ -194,7 +205,7 @@ def load_observed_image_points(recorded_frames_dir, stump_csv_name, default_poin
         print(f"Loaded {len(pts)} observed image points from {csv_path} (no split, all points used).")
         return pts
     else:
-        print(f"{csv_path} not found - using hardcoded IMAGE_POINTS_OBSERVED.")
+        print(f"CSV not found in candidate paths - using hardcoded IMAGE_POINTS_OBSERVED.")
         return default_points
 
 
@@ -220,9 +231,12 @@ def main():
     # --- load intrinsics ---
 
 
-    if USE_MANUAL_PARAMETERS:
+    if USE_MANUAL_PARAMETERS or not os.path.isfile(CALIB_NPZ_PATH):
 
-        print("Using manually supplied camera parameters.")
+        if not os.path.isfile(CALIB_NPZ_PATH):
+            print(f"File '{CALIB_NPZ_PATH}' not found. Falling back to manually supplied camera parameters.")
+        else:
+            print("Using manually supplied camera parameters.")
 
         K = MANUAL_K.copy()
         dist = MANUAL_DIST.copy()
@@ -253,7 +267,8 @@ def main():
 
     t = tvec.ravel()
 
-    # --- observed image points: all rows from stump_image.csv, no split ---
+    # --- observed image points: first try npz, then fallback to CSV ---
+    
     image_points_observed = load_observed_image_points(
         RECORDED_FRAMES_DIR, STUMP_CSV_NAME, IMAGE_POINTS_OBSERVED
     )

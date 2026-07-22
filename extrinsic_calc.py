@@ -37,14 +37,24 @@ def reprojection_error(obj_pts, img_pts, rvec, tvec, K, dist):
 
 def load_camera_intrinsics(calib_npz_path, default_K, default_dist_coeffs):
     """
-    Load K, dist_coeffs from calib_params.npz (expects keys 'mtx', 'dist',
-    and optionally 'rvecs'/'tvecs' which are ignored here) if the file exists.
-    Otherwise fall back to the hardcoded default K / dist_coeffs.
+    Load K, dist_coeffs from calib_params.npz (supports keys 'mtx'/'K', 'dist'/'dist_coeffs')
+    if the file exists. Otherwise fall back to the hardcoded default K / dist_coeffs.
     """
     if os.path.isfile(calib_npz_path):
         data = np.load(calib_npz_path)
-        K = np.array(data['mtx'], dtype=np.float64)
-        dist_coeffs = np.array(data['dist'], dtype=np.float64)
+        if 'mtx' in data.files:
+            K = np.array(data['mtx'], dtype=np.float64)
+        elif 'K' in data.files:
+            K = np.array(data['K'], dtype=np.float64)
+        else:
+            K = default_K
+
+        if 'dist' in data.files:
+            dist_coeffs = np.array(data['dist'], dtype=np.float64)
+        elif 'dist_coeffs' in data.files:
+            dist_coeffs = np.array(data['dist_coeffs'], dtype=np.float64)
+        else:
+            dist_coeffs = default_dist_coeffs
         print(f"[intrinsics] Loaded K, dist_coeffs from {calib_npz_path}")
     else:
         K = default_K
@@ -53,17 +63,70 @@ def load_camera_intrinsics(calib_npz_path, default_K, default_dist_coeffs):
     return K, dist_coeffs
 
 
+def load_keypoints_from_npz(calib_npz_path):
+    """
+    Try loading pitch_image and wicket_image (keypoints) from the .npz file if it exists.
+    Checks for separate keys:
+      - 'pitch_image' / 'pitch_points' / 'pitch_image_points' (16, 2)
+      - 'wicket_image' / 'wicket_points' / 'wicket_image_points' (4, 2)
+    Or a combined key:
+      - 'keypoints' / 'image_points' / 'img_pts' (20, 2) -> first 16 are pitch, last 4 are wicket
+    """
+    if os.path.isfile(calib_npz_path):
+        try:
+            data = np.load(calib_npz_path)
+            pitch_image = None
+            wicket_image = None
+
+            # Check separate keys
+            for p_key in ["pitch_image", "pitch_points", "pitch_image_points"]:
+                if p_key in data.files:
+                    pitch_image = np.array(data[p_key], dtype=np.float64).reshape(-1, 2)
+                    break
+
+            for w_key in ["wicket_image", "wicket_points", "wicket_image_points"]:
+                if w_key in data.files:
+                    wicket_image = np.array(data[w_key], dtype=np.float64).reshape(-1, 2)
+                    break
+
+            if pitch_image is not None and wicket_image is not None:
+                if pitch_image.shape[0] == 16 and wicket_image.shape[0] == 4:
+                    print(f"[keypoints] Loaded pitch_image and wicket_image from {calib_npz_path}")
+                    return pitch_image, wicket_image
+
+            # Check combined keys
+            for c_key in ["keypoints", "image_points", "img_pts"]:
+                if c_key in data.files:
+                    pts = np.array(data[c_key], dtype=np.float64).reshape(-1, 2)
+                    if pts.shape[0] == 20:
+                        pitch_image = pts[:16]
+                        wicket_image = pts[16:20]
+                        print(f"[keypoints] Loaded combined '{c_key}' from {calib_npz_path} and split into pitch/wicket")
+                        return pitch_image, wicket_image
+        except Exception as e:
+            print(f"[keypoints] Error loading keypoints from {calib_npz_path}: {e}")
+    return None, None
+
+
 def load_image_points(recorded_frames_dir, stump_csv_name, default_pitch_image, default_wicket_image):
     """
-    Load pitch_image / wicket_image from
-    <recorded_frames_dir>/<stump_csv_name> (e.g. recorded_frames/stump_image.csv),
-    which has columns: image, point, x, y (for image "stump_image.png").
-    The first 16 rows (in file order — not re-sorted by 'point') become
-    pitch_image, the next 4 rows become wicket_image (stump tops).
-    Falls back to the hardcoded defaults if the CSV isn't found.
+    Load pitch_image / wicket_image from CSV (checks recorded_frames/, kp_output/, or direct path).
+    CSV has columns: image, point, x, y.
+    The first 16 rows become pitch_image, the next 4 rows become wicket_image (stump tops).
+    Falls back to hardcoded defaults if the CSV isn't found.
     """
-    csv_path = os.path.join(recorded_frames_dir, stump_csv_name)
-    if os.path.isfile(csv_path):
+    candidate_paths = [
+        os.path.join(recorded_frames_dir, stump_csv_name),
+        os.path.join("kp_output", stump_csv_name),
+        stump_csv_name,
+    ]
+    csv_path = None
+    for p in candidate_paths:
+        if os.path.isfile(p):
+            csv_path = p
+            break
+
+    if csv_path is not None:
         rows = []
         with open(csv_path, newline="") as f:
             reader = csv.DictReader(f)
@@ -76,12 +139,12 @@ def load_image_points(recorded_frames_dir, stump_csv_name, default_pitch_image, 
     else:
         pitch_image = default_pitch_image
         wicket_image = default_wicket_image
-        print(f"[image points] {csv_path} not found — using hardcoded pitch_image, wicket_image")
+        print(f"[image points] CSV not found in candidate paths -- using hardcoded pitch_image, wicket_image")
     return pitch_image, wicket_image
 
 
-def save_camera_params(K, dist_coeffs, rvec, tvec, R, t, C, out_path):
-    """Store intrinsics (K, dist_coeffs) and extrinsics (rvec, tvec, R, t, C) to a .npz file."""
+def save_camera_params(K, dist_coeffs, rvec, tvec, R, t, C, pitch_image, wicket_image, out_path):
+    """Store intrinsics (K, dist_coeffs), extrinsics (rvec, tvec, R, t, C), and keypoints to a .npz file."""
     np.savez(
         out_path,
         K=K,
@@ -91,8 +154,11 @@ def save_camera_params(K, dist_coeffs, rvec, tvec, R, t, C, out_path):
         R=R,
         t=t,
         C=C,
+        pitch_image=pitch_image,
+        wicket_image=wicket_image,
+        keypoints=np.vstack([pitch_image, wicket_image]),
     )
-    print(f"\nSaved intrinsics + extrinsics to {out_path}")
+    print(f"\nSaved intrinsics + extrinsics + keypoints to {out_path}")
 
 
 #---------------Main-----------------#
@@ -100,19 +166,19 @@ def main(
     image_path=r"recorded_frames\stump_image.png",
     calib_npz_path="calib_params.npz",
     recorded_frames_dir="recorded_frames",
-    stump_csv_name="recorded\stump_image.csv",
-    extrinsics_out_path="camera_params.npz",
+    stump_csv_name="kp_output/stump_image.csv",
+    extrinsics_out_path="calib_params.npz",
     show_display=True,
 ):
     #---------------Camera Intrinsics-----------------#
-    DEFAULT_K = np.array([[ 1.35323365e+04 , 0.00000000e+00, -6.04161675e+02],
- [ 0.00000000e+00,  1.24096074e+04,  4.83085312e+02],
- [ 0.00000000e+00,  0.00000000e+00,  1.00000000e+00]]
+    DEFAULT_K = np.array([[2.45171310e+04, 0.00000000e+00, 1.10824991e+03],
+ [0.00000000e+00, 2.42281298e+04, 2.68066558e+02],
+ [0.00000000e+00, 0.00000000e+00, 1.00000000e+00]]
 
     , dtype=np.float64)
 
-    DEFAULT_dist_coeffs = np.array([[ 1.13924727e+00 , 9.02941843e+00 ,-1.27620822e-02, -2.38576615e-01,
-  -5.06819979e+01]], dtype=np.float64)
+    DEFAULT_dist_coeffs = np.array([[ 1.46278449e+01, -4.23045610e+03 ,-6.01742613e-02,  5.64750980e-02,
+   7.91119438e+04]], dtype=np.float64)
 
     K, dist_coeffs = load_camera_intrinsics(calib_npz_path, DEFAULT_K, DEFAULT_dist_coeffs)
 
@@ -188,9 +254,11 @@ def main(
     (1148, 760),  # 20
     ], dtype=np.float64)
 
-    pitch_image, wicket_image = load_image_points(
-        recorded_frames_dir, stump_csv_name, DEFAULT_pitch_image, DEFAULT_wicket_image
-    )
+    pitch_image, wicket_image = load_keypoints_from_npz(calib_npz_path)
+    if pitch_image is None or wicket_image is None:
+        pitch_image, wicket_image = load_image_points(
+            recorded_frames_dir, stump_csv_name, DEFAULT_pitch_image, DEFAULT_wicket_image
+        )
 
     #---------------Stack all points for combinations-----------------#
     all_world = np.vstack([pitch_world, wicket_world])   # (20, 3)
@@ -222,7 +290,7 @@ def main(
     total   = len(combos)
 
     print("=" * 80)
-    print(f"  PnP Solver  —  {total} combinations of 6 points from {len(all_world)} total")
+    print(f"  PnP Solver  --  {total} combinations of 6 points from {len(all_world)} total")
     print("=" * 80)
 
     #--------------Calculations-----------------#
@@ -241,7 +309,7 @@ def main(
         )
 
         if not success:
-            print(f"\nCombo #{combo_num:5d}  {combo_labels}  →  FAILED")
+            print(f"\nCombo #{combo_num:5d}  {combo_labels}  ->  FAILED")
             continue
 
         # Refine with Levenberg-Marquardt
@@ -260,7 +328,7 @@ def main(
 
         results.append((mean_err, combo_num, combo_labels, rvec, tvec, R, t, C))
 
-        # ── Pretty print ──────────────────────────────────────────────────────────
+        # Pretty print
         sep = "-" * 80
         print(f"\n{sep}")
         print(f"  Combo #{combo_num:5d} / {total}   Points: {combo_labels}")
@@ -273,8 +341,8 @@ def main(
         print(f"\n  Rotation Vector (Rodrigues): "
               f"[{rvec[0,0]:+.6f}, {rvec[1,0]:+.6f}, {rvec[2,0]:+.6f}]")
 
-        print(f"  Euler Angles  →  Roll: {roll:+8.3f}°   "
-              f"Pitch: {pitch:+8.3f}°   Yaw: {yaw:+8.3f}°")
+        print(f"  Euler Angles  ->  Roll: {roll:+8.3f} deg   "
+              f"Pitch: {pitch:+8.3f} deg   Yaw: {yaw:+8.3f} deg")
 
         print(f"\n  Translation Vector t:  "
               f"[{t[0]:+10.6f},  {t[1]:+10.6f},  {t[2]:+10.6f}]  m")
@@ -284,13 +352,13 @@ def main(
 
         print(f"\n  Reprojection Errors (px):")
         for lbl, err in zip(combo_labels, per_pt_err):
-            bar = "█" * min(int(err * 4), 40)
+            bar = "#" * min(int(err * 4), 40)
             print(f"    {lbl:>3s}  {err:6.3f} px  {bar}")
-        print(f"    ── Mean: {mean_err:.4f} px")
+        print(f"    -- Mean: {mean_err:.4f} px")
 
     #--------------Best-3-----------------#
     print("\n" + "=" * 80)
-    print("  SUMMARY  —  Top 3 combinations by lowest mean reprojection error")
+    print("  SUMMARY  --  Top 3 combinations by lowest mean reprojection error")
     print("=" * 80)
     results.sort(key=lambda x: x[0])  # sort ascending by mean error
     for rank, (mean_err, combo_num, combo_labels, rvec, tvec, R, t, C) in \
@@ -317,9 +385,17 @@ def main(
     # Best pose
     mean_err, combo_num, combo_labels, rvec, tvec, R, t, C = results[0]
 
-    print(f"\nVisualizing best solution:")
+    # Refine best pose over ALL 20 points
+    obj_all = all_world.reshape(-1, 1, 3)
+    img_all = all_image.reshape(-1, 1, 2)
+    rvec, tvec = cv2.solvePnPRefineLM(obj_all, img_all, K, dist_coeffs, rvec, tvec)
+    R, _ = cv2.Rodrigues(rvec)
+    t = tvec.flatten()
+    C = camera_centre(R, t)
+
+    print(f"\nVisualizing best solution (refined on all 20 points):")
     print(f"Combo #{combo_num}")
-    print(f"Mean error on selected points: {mean_err:.3f}px")
+    print(f"Initial mean error on selected 6 points: {mean_err:.3f}px")
 
     # Project ALL 20 world points
     projected, _ = cv2.projectPoints(
@@ -327,7 +403,7 @@ def main(
         rvec,
         tvec,
         K,
-        None
+        dist_coeffs
     )
 
     projected = projected.reshape(-1, 2)
@@ -434,13 +510,10 @@ def main(
         dx = proj[0] - meas[0]
         dy = proj[1] - meas[1]
 
-        print(lbl, dx, dy)
+        print(lbl, f"dx={dx:+.3f}", f"dy={dy:+.3f}")
 
-    world_2d = pitch_world[:, [0, 2]].astype(np.float32)
-    image_2d = pitch_image.astype(np.float32)
-
-    #---------------Store intrinsics + extrinsics-----------------#
-    save_camera_params(K, dist_coeffs, rvec, tvec, R, t, C, extrinsics_out_path)
+    #---------------Store intrinsics + extrinsics + keypoints-----------------#
+    save_camera_params(K, dist_coeffs, rvec, tvec, R, t, C, pitch_image, wicket_image, extrinsics_out_path)
 
     print("\nDone.")
 

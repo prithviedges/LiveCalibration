@@ -105,7 +105,8 @@ BOOTSTRAP_MIN_FRAMES = 25       # frames before first live calibration attempt
 ROLLING_FPS_WINDOW   = 50       # frames for rolling fps estimate
 
 # ── Pitch segmentation / active-cell config ──
-PITCH_SEG_MODEL_PATH = r"C:\Users\prith\Downloads\calibration-dashboard\calibration-dashboard\weights\pitch_segmentation.pt"   # path to your YOLO segmentation weights
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+PITCH_SEG_MODEL_PATH = os.path.join(_script_dir, "weights", "pitch_segmentation.pt")   # path to your YOLO segmentation weights
 PITCH_SEG_CONF       = 0.7             # confidence threshold for the seg model
 PITCH_SEG_CLASS_ID   = 0             # None = use all predicted masks; set an int to filter to one class
 PITCH_MARGIN_RATIO   = 0.15             # expand the quad's bounding box by this fraction of its w/h
@@ -1139,7 +1140,7 @@ def run_final_calibration(
         if not ok:
             continue
         proj, _ = cv.projectPoints(obj, rv, tv, mtx, dist)
-        err = cv.norm(img.reshape(-1, 2), proj.reshape(-1, 2), cv.NORM_L2) / max(len(proj), 1)
+        err = float(np.linalg.norm(img.reshape(-1, 2) - proj.reshape(-1, 2), axis=1).mean())
         frame_errors.append((err, obj, img))
 
     frame_errors.sort(key=lambda x: x[0])
