@@ -40,6 +40,7 @@ Controls
 from __future__ import annotations
 import os
 import argparse
+import json
 import math
 import queue
 import random
@@ -47,9 +48,10 @@ import sys
 import threading
 import time
 import warnings
+from datetime import datetime
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 from backend.calibration_state import CalibrationState
 from backend.main import calibration_state
 from backend.instructions import Instruction
@@ -1041,6 +1043,280 @@ def collector_thread_fn(
             publish_engine_snapshot(calibration_state, state.snapshot())
 
 
+def save_calibration_parameters(
+    mtx: np.ndarray,
+    dist: np.ndarray,
+    save_path: str = "calib_params.npz",
+    history_json_path: str = "calib_history.json",
+    history_npz_path: str = "calib_history.npz",
+    stage: str = "bootstrap",
+    ret_rms: Optional[float] = None,
+    rvecs: Optional[Any] = None,
+    tvecs: Optional[Any] = None,
+    num_frames: Optional[int] = None,
+) -> None:
+    """
+    Saves the latest intrinsic matrix and distortion coefficients to calib_params.npz,
+    and appends all calibrations with a timestamp to calib_history.json and calib_history.npz.
+    """
+    now_dt = datetime.now()
+    now_iso = now_dt.isoformat()
+
+    # 1. Update most recent parameters in calib_params.npz
+    save_kwargs: Dict[str, Any] = {
+        "mtx": mtx,
+        "dist": dist,
+        "K": mtx,
+        "dist_coeffs": dist,
+        "timestamp": now_iso,
+        "stage": stage,
+    }
+    if rvecs is not None:
+        save_kwargs["rvecs"] = rvecs
+    if tvecs is not None:
+        save_kwargs["tvecs"] = tvecs
+    if ret_rms is not None:
+        save_kwargs["rms"] = ret_rms
+    if num_frames is not None:
+        save_kwargs["num_frames"] = num_frames
+
+    try:
+        np.savez(save_path, **save_kwargs)
+        print(f"💾  [calib-params] Most recent parameters stored in {save_path} (stage: {stage})")
+    except Exception as e:
+        print(f"❌  [calib-params] Failed to save {save_path}: {e}")
+
+    # 2. Append to calib_history.json
+    history_records = []
+    if os.path.isfile(history_json_path):
+        try:
+            with open(history_json_path, "r", encoding="utf-8") as f:
+                history_records = json.load(f)
+                if not isinstance(history_records, list):
+                    history_records = [history_records]
+        except Exception as e:
+            print(f"⚠  [calib-history] Failed reading {history_json_path}, creating fresh list: {e}")
+            history_records = []
+
+    new_record = {
+        "timestamp": now_iso,
+        "stage": stage,
+        "num_frames": int(num_frames) if num_frames is not None else None,
+        "rms_error": float(ret_rms) if ret_rms is not None else None,
+        "mtx": mtx.tolist() if mtx is not None else None,
+        "dist_coeffs": dist.flatten().tolist() if dist is not None else None,
+    }
+    history_records.append(new_record)
+
+    try:
+        with open(history_json_path, "w", encoding="utf-8") as f:
+            json.dump(history_records, f, indent=2)
+        print(f"📜  [calib-history] Appended calibration record ({stage}) to {history_json_path} (total records: {len(history_records)})")
+    except Exception as e:
+        print(f"❌  [calib-history] Failed writing {history_json_path}: {e}")
+
+    # 3. Append to calib_history.npz
+    try:
+        timestamps_all = []
+        stages_all = []
+        mtx_all = []
+        dist_all = []
+        if os.path.isfile(history_npz_path):
+            with np.load(history_npz_path, allow_pickle=True) as h_data:
+                if "timestamps" in h_data:
+                    timestamps_all = list(h_data["timestamps"])
+                if "stages" in h_data:
+                    stages_all = list(h_data["stages"])
+                if "mtx_all" in h_data:
+                    mtx_all = list(h_data["mtx_all"])
+                if "dist_all" in h_data:
+                    dist_all = list(h_data["dist_all"])
+
+        timestamps_all.append(now_iso)
+        stages_all.append(stage)
+        mtx_all.append(mtx)
+        dist_all.append(dist.flatten())
+
+        np.savez(
+            history_npz_path,
+            timestamps=np.array(timestamps_all, dtype=object),
+            stages=np.array(stages_all, dtype=object),
+            mtx_all=np.array(mtx_all, dtype=np.float64),
+            dist_all=np.array(dist_all, dtype=np.float64),
+        )
+    except Exception as e:
+        print(f"⚠  [calib-history] Failed updating {history_npz_path}: {e}")
+
+
+def normalize_rtsp_url(url: str) -> str:
+    """Safely URL-encodes special characters in RTSP passwords (e.g. '@' in password)."""
+    if not isinstance(url, str) or not (url.startswith("rtsp://") or url.startswith("rtsps://")):
+        return url
+    try:
+        parts = url.split("://", 1)
+        scheme = parts[0]
+        rest = parts[1]
+        if rest.count("@") > 1:
+            userinfo, hostinfo = rest.rsplit("@", 1)
+            if ":" in userinfo:
+                user, pwd = userinfo.split(":", 1)
+                import urllib.parse
+                encoded_pwd = urllib.parse.quote(pwd, safe="")
+                return f"{scheme}://{user}:{encoded_pwd}@{hostinfo}"
+    except Exception:
+        pass
+    return url
+
+
+class ThreadedVideoCapture:
+    """
+    Non-blocking, zero-latency threaded VideoCapture for RTSP streams and webcams.
+    
+    Prevents stream freezing by reading frames continuously in a background thread
+    and always serving only the freshest frame, bypassing OpenCV's internal queue buildup.
+    Robustly handles HEVC (H.265) and H.264 streams with automatic recovery from transient
+    decoder exceptions (e.g. PPS/SPS packet drops).
+    """
+    def __init__(self, src: Union[int, str], width: Optional[int] = None, height: Optional[int] = None):
+        self.src = normalize_rtsp_url(src) if isinstance(src, str) else src
+        self.width = width
+        self.height = height
+        self._stopped = threading.Event()
+        self._lock = threading.Lock()
+        self._latest_frame: Optional[np.ndarray] = None
+        self._frame_event = threading.Event()
+        self._last_frame_time = time.time()
+        self._fps = 25.0
+        
+        self._is_rtsp = isinstance(self.src, str) and (self.src.startswith("rtsp://") or self.src.startswith("rtsps://"))
+        if self._is_rtsp:
+            # Enforce TCP transport and buffer purging without reorder_queue_size;0 which breaks HEVC/H.265
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+                "rtsp_transport;tcp|fflags;nobuffer|max_delay;500000"
+            )
+            
+        self.cap = self._open_capture()
+        self._thread = threading.Thread(target=self._capture_worker, daemon=True, name="threaded-capture")
+        self._thread.start()
+        
+        # Wait up to 5s for the first frame
+        self._frame_event.wait(timeout=5.0)
+
+    def _open_capture(self) -> cv.VideoCapture:
+        if self._is_rtsp:
+            cap = cv.VideoCapture(self.src, cv.CAP_FFMPEG)
+            cap.set(cv.CAP_PROP_BUFFERSIZE, 1)
+        else:
+            cap = cv.VideoCapture(self.src)
+            
+        if self.width:
+            cap.set(cv.CAP_PROP_FRAME_WIDTH, self.width)
+        if self.height:
+            cap.set(cv.CAP_PROP_FRAME_HEIGHT, self.height)
+            
+        fps = cap.get(cv.CAP_PROP_FPS)
+        if fps and 0 < fps <= 120:
+            self._fps = fps
+        return cap
+
+    def _capture_worker(self) -> None:
+        reconnect_delay = 2.0
+        consecutive_errors = 0
+        while not self._stopped.is_set():
+            if not self.cap.isOpened():
+                if self._is_rtsp:
+                    print(f"[threaded-capture] Reconnecting to RTSP stream: {self.src} ...")
+                    time.sleep(reconnect_delay)
+                    try:
+                        self.cap.release()
+                    except Exception:
+                        pass
+                    self.cap = self._open_capture()
+                    continue
+                else:
+                    break
+
+            try:
+                ret, frame = self.cap.read()
+                consecutive_errors = 0
+            except cv.error as exc:
+                # Catch transient C++ decoder exceptions (e.g. HEVC PPS/SPS drops) without crashing thread
+                consecutive_errors += 1
+                if consecutive_errors == 30:
+                    print(f"[threaded-capture] Sustained decode errors ({exc}). Waiting for clean keyframe...")
+                elif consecutive_errors > 60:
+                    print(f"[threaded-capture] Multiple decode errors, reconnecting stream: {self.src} ...")
+                    try:
+                        self.cap.release()
+                    except Exception:
+                        pass
+                    time.sleep(0.5)
+                    self.cap = self._open_capture()
+                    consecutive_errors = 0
+                time.sleep(0.005)
+                continue
+            except Exception:
+                consecutive_errors += 1
+                time.sleep(0.005)
+                continue
+
+            if ret and frame is not None:
+                with self._lock:
+                    self._latest_frame = frame
+                    self._last_frame_time = time.time()
+                self._frame_event.set()
+            else:
+                if self._is_rtsp:
+                    if (time.time() - self._last_frame_time) > 4.0:
+                        print(f"[threaded-capture] Stream stalled (timeout). Reopening: {self.src} ...")
+                        try:
+                            self.cap.release()
+                        except Exception:
+                            pass
+                        time.sleep(1.0)
+                        self.cap = self._open_capture()
+                        self._last_frame_time = time.time()
+                    else:
+                        time.sleep(0.005)
+                else:
+                    time.sleep(0.005)
+
+    def read(self) -> Tuple[bool, Optional[np.ndarray]]:
+        if self._stopped.is_set():
+            return False, None
+            
+        with self._lock:
+            if self._latest_frame is not None:
+                return True, self._latest_frame.copy()
+
+        # If not yet available, wait briefly
+        if self._frame_event.wait(timeout=1.0):
+            with self._lock:
+                if self._latest_frame is not None:
+                    return True, self._latest_frame.copy()
+                    
+        return False, None
+
+    def isOpened(self) -> bool:
+        return self.cap.isOpened() and not self._stopped.is_set()
+
+    def get(self, prop_id: int) -> float:
+        if prop_id == cv.CAP_PROP_FPS and self._fps > 0:
+            return self._fps
+        return self.cap.get(prop_id)
+
+    def set(self, prop_id: int, value: float) -> bool:
+        return self.cap.set(prop_id, value)
+
+    def release(self) -> None:
+        self._stopped.set()
+        self._frame_event.set()
+        try:
+            self.cap.release()
+        except Exception:
+            pass
+
+
 def _bootstrap_calibration(
     shared: Dict,
     shared_lock: threading.Lock,
@@ -1087,6 +1363,14 @@ def _bootstrap_calibration(
     print(f"[bootstrap] Camera matrix estimated from {BOOTSTRAP_MIN_FRAMES} frames  "
           f"(fx={mtx[0,0]:.1f}  fy={mtx[1,1]:.1f}  "
           f"cx={mtx[0,2]:.1f}  cy={mtx[1,2]:.1f})")
+
+    # Save bootstrap calibration parameters
+    save_calibration_parameters(
+        mtx=mtx,
+        dist=dist,
+        stage="bootstrap",
+        num_frames=BOOTSTRAP_MIN_FRAMES,
+    )
 
 
 # ─────────────────────────────────────────────
@@ -1144,7 +1428,7 @@ def run_final_calibration(
         frame_errors.append((err, obj, img))
 
     frame_errors.sort(key=lambda x: x[0])
-    best_n   = min(80, len(frame_errors))
+    best_n   = max(80, len(frame_errors))
     best_obj = [e[1] for e in frame_errors[:best_n]]
     best_img = [e[2] for e in frame_errors[:best_n]]
 
@@ -1157,7 +1441,17 @@ def run_final_calibration(
         print(f"❌  Second-pass calibrateCamera failed: {e}")
         return None, None
 
-    np.savez(save_path, mtx=mtx_f, dist=dist_f, rvecs=rv_f, tvecs=tv_f)
+    # Save final calibration parameters to calib_params.npz and history files
+    save_calibration_parameters(
+        mtx=mtx_f,
+        dist=dist_f,
+        save_path=save_path,
+        stage="final",
+        ret_rms=ret_f,
+        rvecs=rv_f,
+        tvecs=tv_f,
+        num_frames=best_n,
+    )
 
     # ── Pretty terminal output ──────────────────────────────
     sep = "═" * 64
@@ -1195,15 +1489,22 @@ def run_final_calibration(
 # MAIN
 # ─────────────────────────────────────────────
 
-def main() -> None:
+def main(override_args: Optional[List[str]] = None) -> None:
     save_dir = "recorded_frames"
     os.makedirs(save_dir, exist_ok=True)
+    video_dir = "Videos"
+    os.makedirs(video_dir, exist_ok=True)
+
     parser = argparse.ArgumentParser(
         description="Intrinsic camera calibration with live HUD (parallel edition)")
     parser.add_argument("--test", action="store_true",
                         help="Run built-in self-tests and exit")
     parser.add_argument("--source", default=None,
-                        help="Video source: integer index, MJPEG URL, or video file path")
+                        help="Video source: integer index, RTSP URL, MJPEG URL, or video file path")
+    parser.add_argument("--rtsp", default=None,
+                        help="RTSP stream URL (e.g. rtsp://user:pass@ip:554/stream)")
+    parser.add_argument("--threaded", action="store_true",
+                        help="Force threaded non-blocking frame grabber (always used for RTSP)")
     parser.add_argument("--workers", type=int, default=NUM_WORKERS,
                         help=f"Worker threads for parallel detection (default {NUM_WORKERS})")
     parser.add_argument("--save", default="calib_params.npz",
@@ -1216,7 +1517,7 @@ def main() -> None:
                              f"(default {PITCH_MARGIN_RATIO})")
     parser.add_argument("--no-pitch-mask", action="store_true",
                         help="Skip pitch segmentation entirely; keep all grid cells active")
-    args = parser.parse_args()
+    args = parser.parse_args(override_args)
 
     # if args.test:
     #     n_fail = run_self_tests()
@@ -1224,7 +1525,9 @@ def main() -> None:
 
     # ── Camera / video source ────────────────────────────────────
     stream_url: any = 0
-    if args.source is not None:
+    if args.rtsp is not None:
+        stream_url = args.rtsp
+    elif args.source is not None:
         try:
             stream_url = int(args.source)
         except ValueError:
@@ -1240,13 +1543,22 @@ def main() -> None:
         except Exception as e:
             print(f"Could not reach camera API ({e}).  Falling back to webcam 0.")
 
-    cap = cv.VideoCapture(stream_url)
+    is_rtsp = isinstance(stream_url, str) and (
+        stream_url.startswith("rtsp://") or stream_url.startswith("rtsps://")
+    )
+    if is_rtsp or args.threaded:
+        stream_kind = "RTSP" if is_rtsp else "Threaded"
+        print(f"🌐  Opening low-latency {stream_kind} capture: {stream_url}")
+        cap = ThreadedVideoCapture(stream_url, width=1920, height=1080)
+    else:
+        cap = cv.VideoCapture(stream_url)
+        cap.set(cv.CAP_PROP_FRAME_WIDTH, 1920)
+        cap.set(cv.CAP_PROP_FRAME_HEIGHT, 1080)
+        cap.set(cv.CAP_PROP_AUTOFOCUS, 0)
+
     cv.namedWindow("Intrinsic Calibration [Parallel]", cv.WINDOW_NORMAL)
     cv.resizeWindow("Intrinsic Calibration [Parallel]", 1600, 900)
-    cap.set(cv.CAP_PROP_FRAME_WIDTH, 1920)
-    cap.set(cv.CAP_PROP_FRAME_HEIGHT, 1080)
-    cap.set(cv.CAP_PROP_AUTOFOCUS, 0)
-    
+
     ret, frame = cap.read()
     if ret:
         print(f"Actual frame shape: {frame.shape}")
@@ -1292,8 +1604,13 @@ def main() -> None:
     last_snap   = state.snapshot()
     gray_last: Optional[np.ndarray] = None
 
+    # Video recording state
+    video_writer: Optional[cv.VideoWriter] = None
+    video_path: Optional[str] = None
+    video_frames_written = 0
+
     print("\nControls:")
-    print("  SPACE – toggle recording (first press also runs pitch segmentation)")
+    print("  SPACE – toggle recording (first press also runs pitch segmentation, saves video to Videos/)")
     print("  ESC   – stop, calibrate, quit")
     print("  Q     – quit immediately")
     print("  T     – run self-tests in terminal")
@@ -1317,6 +1634,11 @@ def main() -> None:
 
         frame_count += 1
 
+        # Write clean frame to video writer if recording is active
+        if recording and video_writer is not None:
+            video_writer.write(raw_frame)
+            video_frames_written += 1
+
         # Fast board detection for HUD feedback (no subpix, every frame)
         gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
         found_quick, corners_quick = cv.findChessboardCorners(
@@ -1328,8 +1650,6 @@ def main() -> None:
         # Enqueue for parallel full detection (strided, bounded)
         active_futures = {f for f in active_futures if not f.done()}
         if recording and found_quick and frame_count % FRAME_STRIDE == 0:
-            
-            
             if len(active_futures) < MAX_QUEUE_DEPTH:
                 with shared_lock:
                     mtx_snap  = shared["mtx_live"]
@@ -1361,6 +1681,25 @@ def main() -> None:
                 dropped_counter[0] = 0
                 filename = "recorded_frames/stump_image.png"
                 cv.imwrite(filename, raw_frame)
+
+                # Initialize VideoWriter in Videos/ folder
+                timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                video_path = os.path.join(video_dir, f"recording_{timestamp_str}.mp4")
+                h_f, w_f = raw_frame.shape[:2]
+                fps_val = cap.get(cv.CAP_PROP_FPS)
+                if not fps_val or fps_val <= 0 or fps_val > 60:
+                    fps_val = 25.0
+                fourcc = cv.VideoWriter_fourcc(*'mp4v')
+                video_writer = cv.VideoWriter(video_path, fourcc, fps_val, (w_f, h_f))
+                if not video_writer.isOpened():
+                    # Fallback to AVI / XVID if MP4 codec is unavailable
+                    video_path = os.path.join(video_dir, f"recording_{timestamp_str}.avi")
+                    fourcc = cv.VideoWriter_fourcc(*'XVID')
+                    video_writer = cv.VideoWriter(video_path, fourcc, fps_val, (w_f, h_f))
+
+                video_frames_written = 0
+                print(f"🎥  [recording] Started saving video to: {video_path} ({w_f}x{h_f} @ {fps_val:.1f} fps)")
+
                 # ── First recording start: segment the (assumed empty) pitch
                 #    from the current frame and lock the active-cell mask.
                 if pitch_seg_pending:
@@ -1378,12 +1717,21 @@ def main() -> None:
                               f"active cells from pitch quad {quad.tolist()}")
                     else:
                         print("[pitch-seg] no pitch detected — leaving all cells active.")
+            else:
+                if video_writer is not None:
+                    video_writer.release()
+                    print(f"💾  [recording] Video saved: {video_path} ({video_frames_written} frames)")
+                    video_writer = None
 
         elif key == 27:  # ESC
             print("\nESC — stopping and calibrating …")
             break
 
         elif key in (ord('q'), ord('Q')):
+            if video_writer is not None:
+                video_writer.release()
+                print(f"💾  [recording] Video saved: {video_path} ({video_frames_written} frames)")
+                video_writer = None
             stop_collect.set()
             executor.shutdown(wait=False)
             cap.release()
@@ -1399,12 +1747,21 @@ def main() -> None:
         if last_snap["grade"] == "A" and recording:
             print("\n✅  Grade A reached — stopping recording automatically.")
             recording = False
+            if video_writer is not None:
+                video_writer.release()
+                print(f"💾  [recording] Video saved: {video_path} ({video_frames_written} frames)")
+                video_writer = None
             cv.waitKey(1500)
             break
 
     # ── Shutdown ──────────────────────────────────────────────────
     print("\nShutting down worker pool …")
     recording = False
+    if video_writer is not None:
+        video_writer.release()
+        print(f"💾  [recording] Video saved: {video_path} ({video_frames_written} frames)")
+        video_writer = None
+
     executor.shutdown(wait=True)
     stop_collect.set()
     collector.join(timeout=10)
