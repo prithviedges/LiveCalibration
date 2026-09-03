@@ -63,10 +63,11 @@ from backend.calibration_state import CalibrationState
 from backend.instructions import Instruction
 
 # Composite weights — keep these in sync with intrinsic_calc.py's
-# W_SPATIAL / W_POSE / W_RADIAL constants.
-W_SPATIAL = 0.40
-W_POSE = 0.40
-W_RADIAL = 0.20
+# W_SPATIAL / W_POSE / W_DEPTH / W_RADIAL constants.
+W_SPATIAL = 0.30
+W_POSE = 0.30
+W_DEPTH = 0.25
+W_RADIAL = 0.15
 
 _radial_cycle = itertools.cycle([Instruction.MOVE_CLOSER, Instruction.MOVE_FARTHER])
 _pose_cycle = itertools.cycle(
@@ -134,14 +135,31 @@ def _least_covered_direction(occupancy, active_mask) -> Instruction:
 
 
 def derive_instruction(snapshot: Dict[str, Any]) -> tuple[Instruction, str]:
-    spatial, pose, radial = snapshot["spatial"], snapshot["pose"], snapshot["radial"]
-    composite = W_SPATIAL * spatial + W_POSE * pose + W_RADIAL * radial
+    spatial = snapshot["spatial"]
+    pose = snapshot["pose"]
+    depth = snapshot.get("depth", 0.0)
+    radial = snapshot["radial"]
+    composite = W_SPATIAL * spatial + W_POSE * pose + W_DEPTH * depth + W_RADIAL * radial
 
     if snapshot["grade"] == "A" or composite >= 0.85:
         return Instruction.CALIBRATION_COMPLETE, "All coverage targets met"
 
-    weakest = min(("spatial", spatial), ("pose", pose), ("radial", radial), key=lambda t: t[1])[0]
+    weakest = min(
+        ("depth", depth),
+        ("spatial", spatial),
+        ("pose", pose),
+        ("radial", radial),
+        key=lambda t: t[1],
+    )[0]
 
+    if weakest == "depth" and depth < 0.6:
+        d_cnt = snapshot.get("depth_counts", {})
+        if d_cnt.get("far", 0) < 6:
+            return Instruction.MOVE_FARTHER, "Need more distance (FAR frames)"
+        elif d_cnt.get("near", 0) < 6:
+            return Instruction.MOVE_CLOSER, "Bring board closer (NEAR frames)"
+        else:
+            return Instruction.MOVE_FARTHER, "Vary distance from camera"
     if weakest == "radial" and radial < 0.5:
         return next(_radial_cycle), "Radial range too narrow"
     if weakest == "pose" and pose < 0.5:
@@ -159,14 +177,18 @@ def publish_engine_snapshot(calibration_state: CalibrationState, snapshot: Dict[
     if snapshot.get("frames", 0) == 0:
         return  # nothing recorded yet — leave the dashboard's default state
 
-    spatial, pose, radial = snapshot["spatial"], snapshot["pose"], snapshot["radial"]
-    composite = W_SPATIAL * spatial + W_POSE * pose + W_RADIAL * radial
+    spatial = snapshot["spatial"]
+    pose = snapshot["pose"]
+    depth = snapshot.get("depth", 0.0)
+    radial = snapshot["radial"]
+    composite = W_SPATIAL * spatial + W_POSE * pose + W_DEPTH * depth + W_RADIAL * radial
     instruction, reason = derive_instruction(snapshot)
 
     calibration_state.update(
         grade=snapshot["grade"],
         spatial=spatial,
         pose=pose,
+        depth=depth,
         radial=radial,
         progress=composite * 100,
         instruction=instruction.value,

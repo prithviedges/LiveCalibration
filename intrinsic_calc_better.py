@@ -1115,6 +1115,42 @@ def collector_thread_fn(
                 tvec=tvec
             )
 
+        # ── Profile metadata for Stratified Assembler (Option A) ──────
+        with shared_lock:
+            if "frame_profiles" in shared:
+                scale = compute_board_scale(corners2, img_w, img_h)
+                max_r = math.sqrt(max(cx, img_w - cx) ** 2 + max(cy, img_h - cy) ** 2)
+                pts_2d = corners2.reshape(-1, 2)
+                dx = pts_2d[:, 0] - cx
+                dy = pts_2d[:, 1] - cy
+                r_dist = float(np.sqrt(dx ** 2 + dy ** 2).max() / max_r) if max_r > 0 else 0.0
+
+                tilt_deg = 0.0
+                if rvec is not None:
+                    R, _ = cv.Rodrigues(rvec)
+                    cos_theta = np.clip(abs(R[2, 2]), 0.0, 1.0)
+                    tilt_deg = float(math.degrees(math.acos(cos_theta)))
+                else:
+                    top_w = np.linalg.norm(pts_2d[CHECKERBOARD_W - 1] - pts_2d[0])
+                    bot_w = np.linalg.norm(pts_2d[-1] - pts_2d[(CHECKERBOARD_H - 1) * CHECKERBOARD_W])
+                    if max(top_w, bot_w) > 0:
+                        ratio = min(top_w, bot_w) / max(top_w, bot_w)
+                        tilt_deg = float(math.degrees(math.acos(np.clip(ratio, 0.0, 1.0))))
+
+                c_mean = pts_2d.mean(axis=0)
+                col = int(min(max(c_mean[0] / (img_w / GRID_COLS), 0), GRID_COLS - 1))
+                row = int(min(max(c_mean[1] / (img_h / GRID_ROWS), 0), GRID_ROWS - 1))
+
+                shared["frame_profiles"].append({
+                    "idx": n_frames - 1,
+                    "scale": scale,
+                    "tilt_deg": tilt_deg,
+                    "radial_dist": r_dist,
+                    "cell": (row, col),
+                    "tvec": tvec,
+                    "rvec": rvec,
+                })
+
         proc_count += 1
         now = time.perf_counter()
         proc_times.append(now)
@@ -1487,22 +1523,125 @@ def _bootstrap_calibration(
 # FINAL CALIBRATION
 # ─────────────────────────────────────────────
 
+def stratified_sample_indices(
+    profiles: List[Dict[str, Any]],
+    total_budget: int = 60,
+    per_bucket: int = 15,
+) -> Tuple[List[int], Dict[str, int]]:
+    """
+    Stratified Assembler (Option A):
+    Bifurcates frames into 4 curated objective buckets:
+      1. Depth Bucket: Near (large perspective) & Far (flat / orthographic baseline)
+      2. Pose Bucket: Extreme tilt angles (non-coplanar planes for homography solving)
+      3. Radial Bucket: Corners reaching outer lens perimeter (lens distortion fitting)
+      4. Spatial Bucket: Uniform spatial distribution across active grid cells
+
+    Returns:
+        (selected_indices, bucket_counts)
+    """
+    if len(profiles) <= total_budget:
+        counts = {"depth_near": 0, "depth_far": 0, "pose": 0, "radial": 0, "spatial": 0, "total": len(profiles)}
+        for p in profiles:
+            if p.get("scale", 0.0) >= DEPTH_NEAR_SCALE: counts["depth_near"] += 1
+            elif p.get("scale", 0.0) < DEPTH_FAR_SCALE: counts["depth_far"] += 1
+            if p.get("tilt_deg", 0.0) >= 20.0: counts["pose"] += 1
+            if p.get("radial_dist", 0.0) >= 0.70: counts["radial"] += 1
+        return list(range(len(profiles))), counts
+
+    selected = set()
+    b_counts = {"depth_near": 0, "depth_far": 0, "pose": 0, "radial": 0, "spatial": 0}
+
+    # 1. Depth Bucket: Far (smallest scale) & Near (largest scale)
+    far_cands = sorted(profiles, key=lambda p: p.get("scale", 0.5))
+    near_cands = sorted(profiles, key=lambda p: p.get("scale", 0.5), reverse=True)
+    n_far = per_bucket // 2
+    n_near = per_bucket - n_far
+
+    for p in far_cands:
+        if b_counts["depth_far"] >= n_far:
+            break
+        if p["idx"] not in selected:
+            selected.add(p["idx"])
+            b_counts["depth_far"] += 1
+
+    for p in near_cands:
+        if b_counts["depth_near"] >= n_near:
+            break
+        if p["idx"] not in selected:
+            selected.add(p["idx"])
+            b_counts["depth_near"] += 1
+
+    # 2. Pose Bucket: Highest tilt angles
+    tilt_cands = sorted(profiles, key=lambda p: p.get("tilt_deg", 0.0), reverse=True)
+    for p in tilt_cands:
+        if b_counts["pose"] >= per_bucket:
+            break
+        if p["idx"] not in selected:
+            selected.add(p["idx"])
+            b_counts["pose"] += 1
+
+    # 3. Radial Bucket: Corners closest to frame edges
+    radial_cands = sorted(profiles, key=lambda p: p.get("radial_dist", 0.0), reverse=True)
+    for p in radial_cands:
+        if b_counts["radial"] >= per_bucket:
+            break
+        if p["idx"] not in selected:
+            selected.add(p["idx"])
+            b_counts["radial"] += 1
+
+    # 4. Spatial Bucket: Uniform cell distribution
+    by_cell: Dict[Tuple[int, int], List[Dict[str, Any]]] = {}
+    for p in profiles:
+        by_cell.setdefault(p.get("cell", (0, 0)), []).append(p)
+
+    cells = list(by_cell.keys())
+    random.shuffle(cells)
+    cell_ptr = 0
+    while b_counts["spatial"] < per_bucket and cells:
+        c = cells[cell_ptr % len(cells)]
+        avail = [p for p in by_cell[c] if p["idx"] not in selected]
+        if avail:
+            selected.add(avail[0]["idx"])
+            b_counts["spatial"] += 1
+        else:
+            cells.remove(c)
+            if not cells:
+                break
+        cell_ptr += 1
+
+    # Fill remaining budget if needed
+    if len(selected) < total_budget:
+        remaining = [p for p in profiles if p["idx"] not in selected]
+        random.shuffle(remaining)
+        for p in remaining:
+            if len(selected) >= total_budget:
+                break
+            selected.add(p["idx"])
+
+    b_counts["total"] = len(selected)
+    return sorted(list(selected)), b_counts
+
+
 def run_final_calibration(
     objpoints: List[np.ndarray],
     imgpoints: List[np.ndarray],
     img_shape: Tuple[int, int],   # (height, width) — same as gray.shape
     save_path: str = "calib_params.npz",
+    sampling_mode: str = "stratified",
+    frame_profiles: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
     """
-    Two-pass calibration:
-      1. Calibrate on up to 200 randomly sampled frames.
-      2. Re-calibrate on the 50 frames with the lowest reprojection error.
+    Two-pass calibration with Option A Stratified Assembler:
+      1. Calibrate on balanced frames curated across Depth, Pose, Radial, and Spatial buckets.
+      2. Re-calibrate on the lowest-error subset while preserving stratum diversity.
 
     Args:
         objpoints: list of objp arrays.
         imgpoints: list of corner arrays.
         img_shape: (height, width) as returned by gray.shape.
         save_path: where to write calib_params.npz.
+        sampling_mode: 'stratified' (Option A 4-bucket curation) or 'random' (classic).
+        frame_profiles: list of frame profile metadata dicts.
 
     Returns:
         (mtx, dist) or (None, None) if calibration failed.
@@ -1514,9 +1653,24 @@ def run_final_calibration(
 
     img_size = (img_shape[1], img_shape[0])   # (width, height) for OpenCV
 
-    n_sample = min(len(objpoints), 100)
-    idx      = random.sample(range(len(objpoints)), n_sample)
-    print(f"\n📷  Pass 1 — calibrating on {n_sample} frames …")
+    if sampling_mode == "stratified" and frame_profiles and len(frame_profiles) == len(objpoints):
+        idx, b_stats = stratified_sample_indices(frame_profiles, total_budget=60, per_bucket=15)
+        print("\n" + "═" * 64)
+        print("  🎯  OPTION A: STRATIFIED BUCKET SAMPLER ACTIVATED")
+        print("═" * 64)
+        print(f"  Total frames recorded  : {len(objpoints)}")
+        print(f"  Curated sample subset  : {len(idx)} frames")
+        print(f"    • Depth (Near)       : {b_stats.get('depth_near', 0)} frames")
+        print(f"    • Depth (Far)        : {b_stats.get('depth_far', 0)} frames")
+        print(f"    • High Pose Tilt     : {b_stats.get('pose', 0)} frames")
+        print(f"    • Radial Perimeter   : {b_stats.get('radial', 0)} frames")
+        print(f"    • Spatial Uniform    : {b_stats.get('spatial', 0)} frames")
+        print("═" * 64)
+    else:
+        n_sample = min(len(objpoints), 100)
+        idx = random.sample(range(len(objpoints)), n_sample)
+        print(f"\n📷  Pass 1 — calibrating on {n_sample} randomly sampled frames (classic mode) …")
+
     try:
         ret, mtx, dist, rvecs, tvecs = cv.calibrateCamera(
             [objpoints[i] for i in idx],
@@ -1527,9 +1681,11 @@ def run_final_calibration(
         print(f"❌  calibrateCamera failed: {e}")
         return None, None
 
-    # Per-frame reprojection error
+    # Per-frame reprojection error on the sampled set
     frame_errors: List[Tuple[float, np.ndarray, np.ndarray]] = []
-    for obj, img in zip(objpoints, imgpoints):
+    for i in idx:
+        obj = objpoints[i]
+        img = imgpoints[i]
         ok, rv, tv = cv.solvePnP(obj, img, mtx, dist)
         if not ok:
             continue
@@ -1538,12 +1694,18 @@ def run_final_calibration(
         frame_errors.append((err, obj, img))
 
     frame_errors.sort(key=lambda x: x[0])
-    best_n   = max(80, len(frame_errors))
-    best_obj = [e[1] for e in frame_errors[:best_n]]
-    best_img = [e[2] for e in frame_errors[:best_n]]
+    # Protect diversity: retain the best 80% frames, filtering extreme reprojection outliers (> 2.0px)
+    keep_n = max(min(len(frame_errors), 45), int(len(frame_errors) * 0.80))
+    clean_frames = [e for e in frame_errors[:keep_n] if e[0] < 2.0]
+    if len(clean_frames) < 20:
+        clean_frames = frame_errors[:min(len(frame_errors), 25)]
 
-    print(f"🎯  Pass 2 — re-calibrating on best {best_n} frames "
-          f"(median reprojection error: {frame_errors[best_n//2][0]:.3f} px) …")
+    best_n   = len(clean_frames)
+    best_obj = [e[1] for e in clean_frames]
+    best_img = [e[2] for e in clean_frames]
+
+    print(f"🎯  Pass 2 — re-calibrating on refined {best_n} diverse frames "
+          f"(median reprojection error: {clean_frames[best_n//2][0]:.3f} px) …")
     try:
         ret_f, mtx_f, dist_f, rv_f, tv_f = cv.calibrateCamera(
             best_obj, best_img, img_size, None, None)
@@ -1627,6 +1789,8 @@ def main(override_args: Optional[List[str]] = None) -> None:
                              f"(default {PITCH_MARGIN_RATIO})")
     parser.add_argument("--no-pitch-mask", action="store_true",
                         help="Skip pitch segmentation entirely; keep all grid cells active")
+    parser.add_argument("--sampler", choices=["stratified", "random"], default="stratified",
+                        help="Calibration frame sampling strategy: 'stratified' (Option A - 4-bucket curation) or 'random' (classic random 100 sample)")
     args = parser.parse_args(override_args)
 
     # if args.test:
@@ -1681,6 +1845,7 @@ def main(override_args: Optional[List[str]] = None) -> None:
     shared: Dict = {
         "img_w": None, "img_h": None,
         "objpoints": [], "imgpoints": [], "rvecs_live": [],
+        "frame_profiles": [],
         "mtx_live": None, "dist_live": None,
         "bootstrap_done": False,
     }
@@ -1881,12 +2046,18 @@ def main(override_args: Optional[List[str]] = None) -> None:
     with shared_lock:
         obj_copy = shared["objpoints"][:]
         img_copy = shared["imgpoints"][:]
+        profiles_copy = shared.get("frame_profiles", [])[:]
 
     if gray_last is None:
         print("No frames were captured.")
         return
 
-    run_final_calibration(obj_copy, img_copy, gray_last.shape, save_path=args.save)
+    run_final_calibration(
+        obj_copy, img_copy, gray_last.shape,
+        save_path=args.save,
+        sampling_mode=args.sampler,
+        frame_profiles=profiles_copy,
+    )
 
 
 if __name__ == "__main__":

@@ -49,6 +49,7 @@ os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
 )
 
 import intrinsic_calc
+import intrinsic_calc_better
 from backend.main import app, calibration_state
 from integration_example import publish_engine_snapshot
 
@@ -62,18 +63,18 @@ RTSP_SOURCES: Dict[str, str] = {
 }
 
 # ── monkey-patch: forward every engine score update to the dashboard ──
-_original_update = intrinsic_calc.CalibState.update
+def _patch_engine(engine_mod):
+    orig = engine_mod.CalibState.update
+    def _patched_update(self, *args, **kwargs):
+        orig(self, *args, **kwargs)
+        try:
+            publish_engine_snapshot(calibration_state, self.snapshot())
+        except Exception as exc:
+            print(f"[dashboard-bridge] failed to publish snapshot: {exc}")
+    engine_mod.CalibState.update = _patched_update
 
-
-def _patched_update(self, *args, **kwargs):
-    _original_update(self, *args, **kwargs)
-    try:
-        publish_engine_snapshot(calibration_state, self.snapshot())
-    except Exception as exc:  # never let a dashboard hiccup kill the capture loop
-        print(f"[dashboard-bridge] failed to publish snapshot: {exc}")
-
-
-intrinsic_calc.CalibState.update = _patched_update
+_patch_engine(intrinsic_calc)
+_patch_engine(intrinsic_calc_better)
 
 
 def _run_dashboard_server() -> None:
@@ -101,6 +102,22 @@ def parse_args():
         action="store_true",
         help="List available preconfigured RTSP presets and exit",
     )
+    parser.add_argument(
+        "--engine",
+        choices=["better", "classic"],
+        default="better",
+        help="Calibration engine: 'better' (intrinsic_calc_better with Stratified Assembler) or 'classic' (intrinsic_calc). Default: better",
+    )
+    parser.add_argument(
+        "--classic",
+        action="store_true",
+        help="Shorthand to use classic intrinsic_calc.py",
+    )
+    parser.add_argument(
+        "--better",
+        action="store_true",
+        help="Shorthand to use intrinsic_calc_better.py (default)",
+    )
     return parser.parse_known_args()
 
 
@@ -116,10 +133,13 @@ if __name__ == "__main__":
         print("Usage: python webcam.py --rtsp <key_or_url>\n")
         sys.exit(0)
 
+    # Select engine
+    engine_name = "classic" if known_args.classic else ("better" if known_args.better else known_args.engine)
+    selected_engine = intrinsic_calc if engine_name == "classic" else intrinsic_calc_better
+
     # Determine final video source
     source_to_use = None
     if known_args.rtsp is not None:
-        # Check if preset key was used
         if known_args.rtsp in RTSP_SOURCES:
             source_to_use = RTSP_SOURCES[known_args.rtsp]
             print(f"📌 Using RTSP preset '{known_args.rtsp}': {source_to_use}")
@@ -128,10 +148,10 @@ if __name__ == "__main__":
     elif known_args.source is not None:
         source_to_use = known_args.source
 
-    # Prepare arguments to forward to intrinsic_calc.main
+    # Prepare arguments to forward to engine's main
     engine_args = list(extra_args)
     if source_to_use is not None:
-        source_to_use = intrinsic_calc.normalize_rtsp_url(str(source_to_use))
+        source_to_use = selected_engine.normalize_rtsp_url(str(source_to_use))
         engine_args.extend(["--source", str(source_to_use)])
 
     # Start FastAPI dashboard background server
@@ -143,9 +163,10 @@ if __name__ == "__main__":
     print("Dashboard running:")
     print("  Control room (this laptop): http://localhost:8000/")
     print("  Field tablet (same Wi-Fi):  http://<this-machine-LAN-IP>:8000/")
+    print(f"  Calibration Engine:         {engine_name.upper()} ({selected_engine.__name__}.py)")
     if source_to_use is not None:
         print(f"  Video Source:               {source_to_use}")
     print("=" * 70)
 
     # Run the calibration engine with smooth capture and video recording
-    intrinsic_calc.main(engine_args)
+    selected_engine.main(engine_args)

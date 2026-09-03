@@ -164,6 +164,7 @@
   const taskReason = document.getElementById("taskReason");
   const barSpatial = document.getElementById("barSpatial");
   const barPose = document.getElementById("barPose");
+  const barDepth = document.getElementById("barDepth");
   const barRadial = document.getElementById("barRadial");
   const connLabel = document.getElementById("connLabel");
   const coverageCellsEl = document.getElementById("coverageCells");
@@ -240,6 +241,7 @@
 
     setBar(barSpatial, data.spatial);
     setBar(barPose, data.pose);
+    setBar(barDepth, data.depth);
     setBar(barRadial, data.radial);
     updateCoverageGrid(data);
   }
